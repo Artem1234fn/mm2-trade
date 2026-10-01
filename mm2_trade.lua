@@ -1,4 +1,5 @@
-local DEBUG = false -- true: выведет структуру трейд-окна в консоль
+local DEBUG = false -- true: печатает в консоль, что скрипт нашёл в окне трейда
+local COUNT_STACKS = false -- true: умножать цену на жёлтый счётчик количества в слоте (только для суммы в углу)
 
 -- Имя оружия (маленькими буквами) = цена (supremevalues.com/mm2/godlies)
 local VALUES = {
@@ -41,61 +42,105 @@ local VALUES = {
     ["red seer"]=3, ["seer"]=3, ["orange seer"]=2, ["yellow seer"]=2,
 }
 
+-- Заголовки секций трейда (английский исходник и русский вариант)
+local MINE_KEYS   = {"your offer", "ВАШЕ ПРЕДЛОЖЕНИЕ"}
+local THEIRS_KEYS = {"their offer", "ИХ ПРЕДЛОЖЕНИЕ"}
+
 local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
 local lp = Players.LocalPlayer
 local pg = lp:WaitForChild("PlayerGui")
 
-local function offerValue(frame)
+local function origText(l)
+    return l:GetAttribute("orig") or l.Text
+end
+
+-- Элемент реально виден на экране
+local function shown(o)
+    local p = o
+    while p and p ~= pg do
+        if p:IsA("GuiObject") and not p.Visible then return false end
+        if p:IsA("ScreenGui") and not p.Enabled then return false end
+        p = p.Parent
+    end
+    return true
+end
+
+local function hasKey(label, keys)
+    local t = origText(label)
+    local tl = t:lower()
+    for _, k in ipairs(keys) do
+        if t:find(k, 1, true) or tl:find(k, 1, true) then return true end
+    end
+    return false
+end
+
+local function findHeader(keys)
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("TextLabel") and d.Name ~= "ValueTag" and hasKey(d, keys) and shown(d) then
+            return d
+        end
+    end
+end
+
+-- Секция = самый большой родитель заголовка, который не содержит второй заголовок
+local function sectionOf(h, other)
+    local box = h
+    while box.Parent and box.Parent ~= pg and not other:IsDescendantOf(box.Parent) do
+        box = box.Parent
+    end
+    return box
+end
+
+local function offerValue(box)
     local total = 0
-    if not frame then return total end
-    for _, d in ipairs(frame:GetDescendants()) do
-        if d:IsA("TextLabel") then
+    for _, d in ipairs(box:GetDescendants()) do
+        if d:IsA("TextLabel") and d.Name ~= "ValueTag" then
             local v = VALUES[d.Text:lower()]
-            if v then total += v end
+            if v and shown(d) then total += v end
         end
     end
     return total
 end
 
-local function findByName(root, name)
-    for _, d in ipairs(root:GetDescendants()) do
-        if d.Name == name then return d end
-    end
-end
-
--- Дописывает " [число]" к нику, не затирая оригинал
-local function tag(label, value)
-    if not label then return end
-    local orig = label:GetAttribute("orig") or label.Text
-    label:SetAttribute("orig", orig)
-    label.Text = orig .. " [" .. value .. " вал.]"
-end
-
-local function findNameLabel(root, nick)
-    for _, d in ipairs(root:GetDescendants()) do
-        if d:IsA("TextLabel") then
-            local t = (d:GetAttribute("orig") or d.Text):lower()
-            if t:find(nick:lower(), 1, true) then return d end
+-- Ник собеседника в трейде написан в скобках: (Nick)
+local function findNick(box)
+    for _, d in ipairs(box:GetDescendants()) do
+        if d:IsA("TextLabel") and d.Name ~= "ValueTag" then
+            local t = origText(d)
+            if t:match("^%(.+%)$") then return d end
         end
     end
 end
 
--- Плашка WIN / LOSE
+-- Дописывает текст к подписи, не затирая оригинал
+local function tag(label, extra)
+    local o = origText(label)
+    label:SetAttribute("orig", o)
+    local new = o .. " " .. extra
+    if label.Text ~= new then label.Text = new end
+end
+
+-- Интерфейс скрипта
 local gui = Instance.new("ScreenGui")
 gui.Name = "TradeCalc"
 gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999
 gui.Parent = (gethui and gethui()) or pg
+
 local result = Instance.new("TextLabel")
-result.Size = UDim2.new(0, 260, 0, 40)
-result.Position = UDim2.new(0.5, -130, 0, 10)
+result.Size = UDim2.new(0, 280, 0, 36)
+result.Position = UDim2.new(0.5, -140, 0, 4)
 result.BackgroundTransparency = 0.3
 result.BackgroundColor3 = Color3.new(0, 0, 0)
 result.TextColor3 = Color3.new(1, 1, 1)
 result.TextScaled = true
+result.Font = Enum.Font.GothamBold
 result.Visible = false
 result.Parent = gui
 
--- Надпись "Запущен": 5 секунд на экране, потом плавно исчезает
+-- Надпись "Запущен": 5 секунд, потом плавно исчезает
 local started = Instance.new("TextLabel")
 started.Size = UDim2.new(0, 300, 0, 50)
 started.Position = UDim2.new(0.5, -150, 0.4, 0)
@@ -109,75 +154,142 @@ started.Parent = gui
 
 task.spawn(function()
     task.wait(5)
-    local tw = game:GetService("TweenService"):Create(
-        started,
-        TweenInfo.new(1),
-        {TextTransparency = 1, TextStrokeTransparency = 1}
-    )
+    local tw = TweenService:Create(started, TweenInfo.new(1),
+        {TextTransparency = 1, TextStrokeTransparency = 1})
     tw:Play()
     tw.Completed:Wait()
     started:Destroy()
 end)
 
--- Цены над годли в профиле игрока (и в любых окнах кроме трейда)
+-- Цена над каждым годли (профиль, инвентарь, трейд)
 task.spawn(function()
     while task.wait(1.5) do
         for _, d in ipairs(pg:GetDescendants()) do
-            if d:IsA("TextLabel") and not d:FindFirstChild("ValueTag") then
+            if d:IsA("TextLabel") and d.Name ~= "ValueTag" then
                 local v = VALUES[d.Text:lower()]
-                if v and not d:FindFirstAncestor("TradeGUI") and not d:FindFirstAncestor("TradeCalc") then
-                    local t = Instance.new("TextLabel")
-                    t.Name = "ValueTag"
-                    t.Size = UDim2.new(1, 0, 1, 0)
-                    t.Position = UDim2.new(0, 0, -1, 0)
-                    t.BackgroundTransparency = 1
-                    t.Text = tostring(v)
-                    t.TextColor3 = Color3.fromRGB(255, 220, 60)
-                    t.TextStrokeTransparency = 0.3
-                    t.TextScaled = true
-                    t.Font = Enum.Font.GothamBold
-                    t.ZIndex = d.ZIndex + 5
-                    t.Parent = d
+                if v then
+                    local t = d:FindFirstChild("ValueTag")
+                    if not t then
+                        t = Instance.new("TextLabel")
+                        t.Name = "ValueTag"
+                        t.Size = UDim2.new(1, 0, 1, 0)
+                        t.Position = UDim2.new(0, 0, -1, 0)
+                        t.BackgroundTransparency = 1
+                        t.TextColor3 = Color3.fromRGB(120, 255, 170)
+                        t.TextStrokeTransparency = 0.3
+                        t.TextScaled = true
+                        t.Font = Enum.Font.GothamBold
+                        t.ZIndex = d.ZIndex + 5
+                        t.Parent = d
+                    end
+                    local txt = v .. " вал."
+                    if t.Text ~= txt then t.Text = txt end
                 end
             end
         end
     end
 end)
 
-local printed = false
-while task.wait(0.5) do
-    local trade = pg:FindFirstChild("TradeGUI", true)
-    if trade and trade.Enabled ~= false then
-        if DEBUG and not printed then
-            printed = true
-            for _, d in ipairs(trade:GetDescendants()) do
-                print(d:GetFullName(), d.ClassName, d:IsA("TextLabel") and d.Text or "")
+-- Сумма всех годли в профиле/инвентаре (в правом нижнем углу)
+local inTrade = false
+
+local function qtyOf(label)
+    local root = label.Parent
+    if not root then return 1 end
+    for _, d in ipairs(root:GetChildren()) do
+        if d:IsA("TextLabel") and d.Name ~= "ValueTag" and d ~= label then
+            local n = d.Text:match("^[xX]?%s*(%d+)$")
+            if n and shown(d) then return tonumber(n) end
+        end
+    end
+    return 1
+end
+
+local totalLbl = Instance.new("TextLabel")
+totalLbl.Size = UDim2.new(0, 300, 0, 34)
+totalLbl.Position = UDim2.new(1, -310, 1, -44)
+totalLbl.BackgroundTransparency = 0.3
+totalLbl.BackgroundColor3 = Color3.new(0, 0, 0)
+totalLbl.TextColor3 = Color3.fromRGB(255, 220, 60)
+totalLbl.TextScaled = true
+totalLbl.Font = Enum.Font.GothamBold
+totalLbl.Visible = false
+totalLbl.Parent = gui
+
+task.spawn(function()
+    local lastDbg = ""
+    while task.wait(2) do
+        local bestSum, bestCnt, bestGui = 0, 0, nil
+        if not inTrade then
+            for _, sg in ipairs(pg:GetChildren()) do
+                if sg:IsA("ScreenGui") and sg.Enabled then
+                    local sum, cnt, vis = 0, 0, false
+                    for _, d in ipairs(sg:GetDescendants()) do
+                        if d:IsA("TextLabel") and d.Name ~= "ValueTag" then
+                            local v = VALUES[d.Text:lower()]
+                            if v then
+                                sum += v * (COUNT_STACKS and qtyOf(d) or 1)
+                                cnt += 1
+                                if not vis and shown(d) then vis = true end
+                            end
+                        end
+                    end
+                    -- показываем, только если окно реально открыто (видны предметы)
+                    if vis and sum > bestSum then
+                        bestSum, bestCnt, bestGui = sum, cnt, sg
+                    end
+                end
             end
         end
-        local mine   = findByName(trade, "YourOffer")
-        local theirs = findByName(trade, "TheirOffer")
-        local myV, thV = offerValue(mine), offerValue(theirs)
+        if bestGui then
+            totalLbl.Text = "Годли всего: " .. bestSum .. " вал. (" .. bestCnt .. " шт.)"
+            totalLbl.Visible = true
+            if DEBUG and lastDbg ~= bestGui.Name then
+                lastDbg = bestGui.Name
+                print("TOTAL from ScreenGui:", bestGui.Name, bestSum, bestCnt)
+            end
+        else
+            totalLbl.Visible = false
+        end
+    end
+end)
 
-        tag(findNameLabel(mine or trade, lp.Name) or findNameLabel(mine or trade, lp.DisplayName), myV)
-        -- ник партнёра: берём подпись над его оффером
-        if theirs then
-            for _, d in ipairs(theirs.Parent:GetDescendants()) do
-                if d:IsA("TextLabel") and d.Text:lower():find("offer") == nil and d.Text ~= "" and not VALUES[d.Text:lower()] and (d.Name:lower():find("name") or d.Name:lower():find("user")) then
-                    tag(d, thV)
-                    break
+local printed = false
+while task.wait(0.5) do
+    local hm = findHeader(MINE_KEYS)
+    local ht = findHeader(THEIRS_KEYS)
+    inTrade = (hm and ht) and true or false
+    if hm and ht then
+        local mb, tb = sectionOf(hm, ht), sectionOf(ht, hm)
+        local myV, thV = offerValue(mb), offerValue(tb)
+
+        if DEBUG and not printed then
+            printed = true
+            print("MINE:", mb:GetFullName(), "THEIRS:", tb:GetFullName())
+            for _, d in ipairs(tb:GetDescendants()) do
+                if d:IsA("TextLabel") then
+                    print(d:GetFullName(), "| Text:", d.Text, "| Content:", d.ContentText)
                 end
             end
         end
 
+        tag(hm, "[" .. myV .. " вал.]")
+        local nick = findNick(tb)
+        if nick then
+            tag(nick, "[" .. thV .. " вал.]")
+        else
+            tag(ht, "[" .. thV .. " вал.]")
+        end
+
         result.Visible = true
         if thV > myV then
-            result.Text = "WIN (+" .. (thV - myV) .. ")"
+            result.Text = "WIN +" .. (thV - myV) .. " (" .. myV .. " / " .. thV .. ")"
             result.TextColor3 = Color3.fromRGB(80, 255, 80)
         elseif thV < myV then
-            result.Text = "LOSE (-" .. (myV - thV) .. ")"
+            result.Text = "LOSE -" .. (myV - thV) .. " (" .. myV .. " / " .. thV .. ")"
             result.TextColor3 = Color3.fromRGB(255, 80, 80)
         else
-            result.Text = "EVEN"
+            result.Text = "EVEN (" .. myV .. " / " .. thV .. ")"
             result.TextColor3 = Color3.new(1, 1, 1)
         end
     else
