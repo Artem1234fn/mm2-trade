@@ -119,6 +119,31 @@ task.spawn(function()
     started:Destroy()
 end)
 
+-- Цены над годли в профиле игрока (и в любых окнах кроме трейда)
+task.spawn(function()
+    while task.wait(1.5) do
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("TextLabel") and not d:FindFirstChild("ValueTag") then
+                local v = VALUES[d.Text:lower()]
+                if v and not d:FindFirstAncestor("TradeGUI") and not d:FindFirstAncestor("TradeCalc") then
+                    local t = Instance.new("TextLabel")
+                    t.Name = "ValueTag"
+                    t.Size = UDim2.new(1, 0, 1, 0)
+                    t.Position = UDim2.new(0, 0, -1, 0)
+                    t.BackgroundTransparency = 1
+                    t.Text = tostring(v)
+                    t.TextColor3 = Color3.fromRGB(255, 220, 60)
+                    t.TextStrokeTransparency = 0.3
+                    t.TextScaled = true
+                    t.Font = Enum.Font.GothamBold
+                    t.ZIndex = d.ZIndex + 5
+                    t.Parent = d
+                end
+            end
+        end
+    end
+end)
+
 local printed = false
 while task.wait(0.5) do
     local trade = pg:FindFirstChild("TradeGUI", true)
