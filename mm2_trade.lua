@@ -161,37 +161,19 @@ task.spawn(function()
     started:Destroy()
 end)
 
--- Цена над каждым годли (профиль, инвентарь, трейд)
-task.spawn(function()
-    while task.wait(1.5) do
-        for _, d in ipairs(pg:GetDescendants()) do
-            if d:IsA("TextLabel") and d.Name ~= "ValueTag" then
-                local v = VALUES[d.Text:lower()]
-                if v then
-                    local t = d:FindFirstChild("ValueTag")
-                    if not t then
-                        t = Instance.new("TextLabel")
-                        t.Name = "ValueTag"
-                        t.Size = UDim2.new(1, 0, 1, 0)
-                        t.Position = UDim2.new(0, 0, -1, 0)
-                        t.BackgroundTransparency = 1
-                        t.TextColor3 = Color3.fromRGB(120, 255, 170)
-                        t.TextStrokeTransparency = 0.3
-                        t.TextScaled = true
-                        t.Font = Enum.Font.GothamBold
-                        t.ZIndex = d.ZIndex + 5
-                        t.Parent = d
-                    end
-                    local txt = v .. " вал."
-                    if t.Text ~= txt then t.Text = txt end
-                end
-            end
-        end
-    end
-end)
-
--- Сумма всех годли в профиле/инвентаре (в правом нижнем углу)
+-- Общие переменные для меток над предметами и суммы в углу
+local SHOW_UNKNOWN = true -- true: предметы без цены в таблице помечаются "?"
 local inTrade = false
+local invGui = nil   -- окно инвентаря/профиля, которое сейчас считаем
+local sig = {}       -- "подпись" названий предметов: Name|Parent.Name
+
+local function sigOf(d)
+    return d.Name .. "|" .. (d.Parent and d.Parent.Name or "")
+end
+
+local function looksLikeName(d)
+    return d.Text ~= "" and not d.Text:match("^[%d%s%p]+$")
+end
 
 local function qtyOf(label)
     local root = label.Parent
@@ -205,9 +187,47 @@ local function qtyOf(label)
     return 1
 end
 
+local function makeTag(d)
+    local t = Instance.new("TextLabel")
+    t.Name = "ValueTag"
+    t.Size = UDim2.new(1, 0, 1, 0)
+    t.Position = UDim2.new(0, 0, -1, 0)
+    t.BackgroundTransparency = 1
+    t.TextStrokeTransparency = 0.3
+    t.TextScaled = true
+    t.Font = Enum.Font.GothamBold
+    t.ZIndex = d.ZIndex + 5
+    t.Parent = d
+    return t
+end
+
+-- Цена над каждым годли (профиль, инвентарь, трейд)
+task.spawn(function()
+    while task.wait(1.5) do
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Name ~= "ValueTag" then
+                local v = VALUES[d.Text:lower()]
+                if v then
+                    local t = d:FindFirstChild("ValueTag") or makeTag(d)
+                    t.TextColor3 = Color3.fromRGB(120, 255, 170)
+                    local txt = v .. " вал."
+                    if t.Text ~= txt then t.Text = txt end
+                elseif SHOW_UNKNOWN and invGui and looksLikeName(d)
+                    and sig[sigOf(d)] and d:IsDescendantOf(invGui) then
+                    local t = d:FindFirstChild("ValueTag") or makeTag(d)
+                    t.TextColor3 = Color3.fromRGB(255, 160, 60)
+                    if t.Text ~= "? вал." then t.Text = "? вал." end
+                end
+            end
+        end
+    end
+end)
+
+-- Сумма всех годли в профиле/инвентаре (в правом нижнем углу).
+-- Копится по вкладкам: открой "Сезон 1", "Классический", "Праздник"... и сумма вырастет.
 local totalLbl = Instance.new("TextLabel")
-totalLbl.Size = UDim2.new(0, 300, 0, 34)
-totalLbl.Position = UDim2.new(1, -310, 1, -44)
+totalLbl.Size = UDim2.new(0, 340, 0, 34)
+totalLbl.Position = UDim2.new(1, -350, 1, -44)
 totalLbl.BackgroundTransparency = 0.3
 totalLbl.BackgroundColor3 = Color3.new(0, 0, 0)
 totalLbl.TextColor3 = Color3.fromRGB(255, 220, 60)
@@ -217,39 +237,69 @@ totalLbl.Visible = false
 totalLbl.Parent = gui
 
 task.spawn(function()
-    local lastDbg = ""
+    local seen, unknown = {}, {}
+    local lastGui, empty = nil, 0
     while task.wait(2) do
-        local bestSum, bestCnt, bestGui = 0, 0, nil
-        if not inTrade then
+        local best, bestCnt = nil, 0
+        if inTrade then
+            totalLbl.Visible = false
+        else
             for _, sg in ipairs(pg:GetChildren()) do
                 if sg:IsA("ScreenGui") and sg.Enabled then
-                    local sum, cnt, vis = 0, 0, false
+                    local cnt, vis = 0, false
                     for _, d in ipairs(sg:GetDescendants()) do
-                        if d:IsA("TextLabel") and d.Name ~= "ValueTag" then
-                            local v = VALUES[d.Text:lower()]
-                            if v then
-                                sum += v * (COUNT_STACKS and qtyOf(d) or 1)
-                                cnt += 1
-                                if not vis and shown(d) then vis = true end
-                            end
+                        if d:IsA("TextLabel") and d.Name ~= "ValueTag" and VALUES[d.Text:lower()] then
+                            cnt += 1
+                            if not vis and shown(d) then vis = true end
                         end
                     end
-                    -- показываем, только если окно реально открыто (видны предметы)
-                    if vis and sum > bestSum then
-                        bestSum, bestCnt, bestGui = sum, cnt, sg
-                    end
+                    if vis and cnt > bestCnt then best, bestCnt = sg, cnt end
                 end
             end
-        end
-        if bestGui then
-            totalLbl.Text = "Годли всего: " .. bestSum .. " вал. (" .. bestCnt .. " шт.)"
-            totalLbl.Visible = true
-            if DEBUG and lastDbg ~= bestGui.Name then
-                lastDbg = bestGui.Name
-                print("TOTAL from ScreenGui:", bestGui.Name, bestSum, bestCnt)
+
+            if best then
+                empty = 0
+                if best ~= lastGui then
+                    seen, unknown = {}, {}
+                    table.clear(sig)
+                    lastGui = best
+                end
+                invGui = best
+                for _, d in ipairs(best:GetDescendants()) do
+                    if d:IsA("TextLabel") and d.Name ~= "ValueTag" then
+                        local key = d.Text:lower()
+                        local v = VALUES[key]
+                        if v then
+                            sig[sigOf(d)] = true
+                            local q = COUNT_STACKS and qtyOf(d) or 1
+                            if not seen[key] or q > seen[key].q then seen[key] = {v = v, q = q} end
+                        end
+                    end
+                end
+                for _, d in ipairs(best:GetDescendants()) do
+                    if d:IsA("TextLabel") and d.Name ~= "ValueTag" and not VALUES[d.Text:lower()]
+                        and looksLikeName(d) and sig[sigOf(d)] and not unknown[d.Text] then
+                        unknown[d.Text] = true
+                        print("Нет цены в таблице:", d.Text)
+                    end
+                end
+
+                local sum, cnt, unk = 0, 0, 0
+                for _, e in pairs(seen) do sum += e.v * e.q; cnt += e.q end
+                for _ in pairs(unknown) do unk += 1 end
+                local txt = "Годли всего: " .. sum .. " вал. (" .. cnt .. " шт.)"
+                if unk > 0 then txt = txt .. " +" .. unk .. " без цены" end
+                totalLbl.Text = txt
+                totalLbl.Visible = true
+            else
+                -- окно закрыто: сбрасываем накопленное только после нескольких пустых проверок
+                empty += 1
+                if empty >= 3 then
+                    seen, unknown, lastGui, invGui = {}, {}, nil, nil
+                    table.clear(sig)
+                end
+                totalLbl.Visible = false
             end
-        else
-            totalLbl.Visible = false
         end
     end
 end)
